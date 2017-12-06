@@ -1,12 +1,13 @@
 from collections import defaultdict, deque
 
 from fantasyfutures.matching.trade import Trade
+from fantasyfutures.utils import SortedDefaultDict
 
 
 class OrderBook:
     def __init__(self, *subscribers):
-        self.bids = defaultdict(deque)  # TODO, this needs a class.
-        self.asks = defaultdict(deque)
+        self.bids = Levels(reverse=True)  # TODO, this needs a class.
+        self.asks = Levels()
 
         self._trade_id = 1
         self._subscribers = subscribers
@@ -20,30 +21,24 @@ class OrderBook:
             return f'{price}\t{qty}'
 
         lines = ['OrderBook:']
-        lines.append('-----------')
+        lines.append('[')
         asks = []
-        for price in sorted(self.asks, reverse=True):
+        for price in self.asks.keys()[:5][::-1]:
             orders = self.asks[price]
             if orders:
                 asks.append(agg_level_str(price, orders))
-
-            if len(asks) == 5:
-                break
 
         lines.extend(asks)
         lines.append('-----------')
 
         bids = []
-        for price in sorted(self.bids, reverse=True):
+        for price in self.bids.keys()[:5]:
             orders = self.bids[price]
             if orders:
                 bids.append(agg_level_str(price, orders))
 
-            if len(bids) == 5:
-                break
-
         lines.extend(bids)
-        lines.append('-----------')
+        lines.append(']')
 
         return '\n'.join(lines)
 
@@ -62,10 +57,10 @@ class OrderBook:
         trades = None
 
         if order.is_buy:
-            if self.asks and order.price >= min(self.asks):
+            if self.asks and order.price >= self.asks.inside():
                 trades = self.new_aggressive_order(order)
         else:
-            if self.bids and order.price <= min(self.bids):
+            if self.bids and order.price <= self.bids.inside():
                 trades = self.new_aggressive_order(order)
 
         if not order.is_filled:
@@ -80,7 +75,7 @@ class OrderBook:
 
     def new_passive_order(self, passive):
         levels = self.bids if passive.is_buy else self.asks
-        levels[passive.price].append(passive)
+        levels.add(passive)
 
     def new_aggressive_order(self, aggressive):
         """
@@ -91,32 +86,33 @@ class OrderBook:
         trades = []
 
         if aggressive.is_buy:
-            for price in sorted(self.asks):
+            for price in self.asks.keys():
                 if aggressive.is_filled:
                     break
 
                 if price > aggressive.price:
                     break
 
-                orders = self.asks[price]
                 trades.extend(
-                    self._match_aggressive_order(aggressive, orders))
+                    self._match_aggressive_order(aggressive, price, self.asks))
 
         else:
-            for price in sorted(self.bids, reverse=True):
+            for price in self.bids.keys():
+                if aggressive.is_filled:
+                    break
+
                 if price < aggressive.price:
                     break
 
-                orders = self.bids[price]
                 trades.extend(
-                    self._match_aggressive_order(aggressive, orders))
+                    self._match_aggressive_order(aggressive, price, self.bids))
 
         return trades
 
-    def _match_aggressive_order(self, aggressive, passive_orders):
+    def _match_aggressive_order(self, aggressive, price, levels):
         trades = []
         filled_orders = []
-        for passive in passive_orders:
+        for passive in levels[price]:
 
             matched_qty = min(passive.unfilled_qty, aggressive.unfilled_qty)
 
@@ -134,7 +130,7 @@ class OrderBook:
                 break
 
         for order in filled_orders:
-            passive_orders.remove(order)
+            levels.remove(order)
 
         return trades
 
@@ -154,8 +150,7 @@ class OrderBook:
         :return: 
         """
         levels = self.bids if order.is_buy else self.asks
-        level = levels[order.price]
-        level.remove(order)
+        levels.remove(order)
         order.cancel()
 
         self.publish(order)
@@ -174,3 +169,22 @@ class OrderBook:
     def new_trade(self, passive_order, aggressive_order, qty):
         self._trade_id += 1
         return Trade(self._trade_id, passive_order, aggressive_order, qty)
+
+
+class Levels(SortedDefaultDict):
+    def __init__(self, *args, **kwargs):
+        super(Levels, self).__init__(deque, *args, **kwargs)
+
+    def add(self, order):
+        self[order.price].append(order)
+
+    def remove(self, order):
+        orders = self[order.price]
+        orders.remove(order)
+
+        if not orders:
+            # remove the level if we no longer have any orders
+            del self[order.price]
+
+    def inside(self):
+        return self.key_order[0]

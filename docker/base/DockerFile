@@ -1,0 +1,13 @@
+# A base image for all services
+FROM continuumio/anaconda3:latest
+
+MAINTAINER Anthony MacKinnon
+
+COPY . /usr/local/fantasyfutures
+
+RUN pip install -e /usr/local/fantasyfutures
+
+
+
+
+
